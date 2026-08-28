@@ -132,7 +132,7 @@ def _(mo):
     _df = mo.sql(
         f"""
         select filename, *
-        from 's3://broccoli-alpha/data/openalex/ingestion/works/*.parquet'
+        from 's3://broccoli-alpha/data/openalex/ingestion/works/*_data.parquet'
         limit 10
         """
     )
@@ -168,14 +168,14 @@ def _(INGEST_PATH, mo):
         SELECT
           count(*)                                      AS n_works,
           count(DISTINCT id)                            AS n_unique_works,
-          count(*) FILTER (WHERE publication_year IS NULL) AS null_year,
+          count(*) FILTER (WHERE publication_date IS NULL) AS null_year,
           count(*) FILTER (WHERE oa_status IS NULL)        AS null_status,
           count(*) FILTER (WHERE type IS NULL)             AS null_type,
-          min(publication_year)                         AS min_year,
-          max(publication_year)                         AS max_year,
-          count(DISTINCT publication_year)              AS n_years,
+          min(year(publication_date))                         AS min_year,
+          max(year(publication_date))                         AS max_year,
+          count(DISTINCT year(publication_date))              AS n_years,
           count(DISTINCT oa_status)                     AS n_oa_types
-        FROM read_parquet('{INGEST_PATH}/*.parquet')
+        FROM read_parquet('{INGEST_PATH}/*_data.parquet')
         """
     )
     return
@@ -186,7 +186,7 @@ def _(INGEST_PATH, mo):
     _schema = mo.sql(
         f"""
         SELECT column_name, column_type
-        FROM (DESCRIBE SELECT * FROM read_parquet('{INGEST_PATH}/*.parquet'))
+        FROM (DESCRIBE SELECT * FROM read_parquet('{INGEST_PATH}/*_data.parquet'))
         """
     )
     return
@@ -197,7 +197,7 @@ def _(BRONZE_PATH, INGEST_PATH, mo):
     # --- Store bronze (validated pass-through of the raw slice) ---
     _bronze_write = mo.sql(
         f"""
-        COPY (SELECT * FROM read_parquet('{INGEST_PATH}/*.parquet'))
+        COPY (SELECT * FROM read_parquet('{INGEST_PATH}/*_data.parquet'))
         TO '{BRONZE_PATH}' (FORMAT PARQUET, FILE_SIZE_BYTES )
         """
     )

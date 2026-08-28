@@ -25,7 +25,7 @@ def _(os):
     return
 
 
-@app.cell(hide_code=True)
+@app.cell
 def surf_secret(mo, os):
     _df = mo.sql(
         f"""
@@ -46,12 +46,11 @@ def surf_secret(mo, os):
 
 @app.cell
 def _():
-    RAW_PATH = "s3://broccoli-alpha/data/publisher_reports/raw"
+    RAW_PATH    = "s3://broccoli-alpha/data/publisher_reports/raw"
     INGEST_PATH = "s3://broccoli-alpha/data/publisher_reports/ingest"
     BRONZE_PATH = "s3://broccoli-alpha/data/publisher_reports/bronze"
     SILVER_PATH = "s3://broccoli-alpha/data/publisher_reports/silver"
-    GOLD_PATH =   "s3://broccoli-alpha/data/publisher_reports/gold"
-
+    GOLD_PATH   = "s3://broccoli-alpha/data/publisher_reports/gold"
     return BRONZE_PATH, INGEST_PATH, RAW_PATH, SILVER_PATH
 
 
@@ -182,7 +181,6 @@ def ingest(INGEST_PATH, PUB_CFG, RAW_PATH, mo):
         GROUP BY 1 ORDER BY 1
         """
     )
-
     return
 
 
@@ -226,7 +224,6 @@ def bronze(
     _bronze_checks = mo.sql(
         f"SELECT publisher, count(*) AS n_rows FROM read_parquet('{BRONZE_PATH}/works.parquet') GROUP BY publisher ORDER BY publisher"
     )
-
     return
 
 
@@ -303,7 +300,6 @@ def silver(BRONZE_PATH, SILVER_PATH, mo):
 
     # --- Preview ---
     _silver_preview = mo.sql("SELECT publisher, count(*) AS n FROM pr_silver GROUP BY publisher ORDER BY publisher")
-
     return
 
 
