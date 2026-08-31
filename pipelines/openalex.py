@@ -54,12 +54,19 @@ def _(mo, os):
 
 
 @app.cell
-def _():
-    INGEST_PATH = "s3://broccoli-alpha/data/openalex/ingestion/works"
-    BRONZE_PATH = "s3://broccoli-alpha/data/openalex/bronze/works.parquet"
-    SILVER_PATH = "s3://broccoli-alpha/data/openalex/silver/works.parquet"
-    GOLD_PATH =   "s3://broccoli-alpha/data/openalex/gold/oa_by_year_type.parquet"
-    return BRONZE_PATH, GOLD_PATH, INGEST_PATH, SILVER_PATH
+def _(mo):
+    _df = mo.sql(
+        f"""
+        CREATE OR REPLACE SECRET broccoli_ducklake (
+            TYPE ducklake,
+            METADATA_PATH 'broccoli.ducklake',
+            DATA_PATH 's3://broccoli-alpha/lake/'
+        );
+
+        ATTACH 'ducklake:broccoli_ducklake' as db;
+        """
+    )
+    return
 
 
 @app.cell(hide_code=True)
@@ -70,23 +77,35 @@ def _(mo):
     return
 
 
-@app.cell(disabled=True)
-def _(INGEST_PATH, mo):
-    _ = mo.sql(
+@app.cell
+def _():
+    INGEST_PATH = "s3://broccoli-alpha/data/openalex/ingestion/works"
+    return (INGEST_PATH,)
+
+
+@app.cell
+def _(mo):
+    _df = mo.sql(
         f"""
-        COPY (select NULL as path limit 0) to '{INGEST_PATH}/ingest.parquet';
+        CREATE SCHEMA IF NOT EXISTS db.meta;
+        CREATE TABLE IF NOT EXISTS db.meta.ingest_log (
+            data_source VARCHAR,
+            file VARCHAR,
+            ingest_date DATETIME
+        );
         """
     )
     return
 
 
 @app.cell
-def _(INGEST_PATH, mo):
+def _(mo):
     PATHS = mo.sql(
         f"""
-        SELECT file as path from glob('s3://openalex/data/parquet/works/*/*.parquet')
+        SELECT file from glob('s3://openalex/data/parquet/works/*/*.parquet')
         EXCEPT
-        SELECT path from '{INGEST_PATH}/ingest.parquet'
+        SELECT file from db.meta.ingest_log
+        WHERE data_source = 'openalex_parquet_public'
         """,
         output=False
     )
@@ -112,11 +131,8 @@ def _(INGEST_PATH, PATHS, mo):
                 WHERE list_contains(flatten(list_transform(authorships, a -> a.countries)), 'NL')
             ) TO '{INGEST_PATH}/{batch_number}_data.parquet' (FORMAT PARQUET);
 
-            COPY (
-                SELECT path FROM '{INGEST_PATH}/ingest.parquet'
-                UNION
-                SELECT unnest({batch}) as path
-            ) to '{INGEST_PATH}/ingest.parquet';
+            INSERT INTO db.meta.ingest_log
+            SELECT 'openalex_parquet_public', unnest({batch}) as file, now() as ingest_date;
         """)
 
     batchsize = 10
@@ -129,11 +145,10 @@ def _(INGEST_PATH, PATHS, mo):
 
 @app.cell
 def _(mo):
+    # Pull Dutch works (authorship institution country == NL) into a DuckDB table
     _df = mo.sql(
         f"""
-        select filename, *
-        from 's3://broccoli-alpha/data/openalex/ingestion/works/*_data.parquet'
-        limit 10
+        SELECT * FROM db.meta.ingest_log WHERE data_source = 'openalex_parquet_public'
         """
     )
     return
@@ -141,13 +156,9 @@ def _(mo):
 
 @app.cell(hide_code=True)
 def _(INGEST_PATH, mo):
-    # Pull Dutch works (authorship institution country == NL) into a DuckDB table
     _df = mo.sql(
         f"""
-        SELECT year(publication_date), oa_status, count(*) AS n 
-        FROM '{INGEST_PATH}/*.parquet'
-        GROUP BY 1, 2 
-        ORDER BY 1, 2
+        SELECT count() from glob('{INGEST_PATH}/*_data.parquet');
         """
     )
     return
@@ -166,15 +177,15 @@ def _(INGEST_PATH, mo):
     _counts = mo.sql(
         f"""
         SELECT
-          count(*)                                      AS n_works,
-          count(DISTINCT id)                            AS n_unique_works,
+          count(*)                                         AS n_works,
+          count(DISTINCT id)                               AS n_unique_works,
           count(*) FILTER (WHERE publication_date IS NULL) AS null_year,
           count(*) FILTER (WHERE oa_status IS NULL)        AS null_status,
           count(*) FILTER (WHERE type IS NULL)             AS null_type,
-          min(year(publication_date))                         AS min_year,
-          max(year(publication_date))                         AS max_year,
-          count(DISTINCT year(publication_date))              AS n_years,
-          count(DISTINCT oa_status)                     AS n_oa_types
+          min(year(publication_date))                      AS min_year,
+          max(year(publication_date))                      AS max_year,
+          count(DISTINCT year(publication_date))           AS n_years,
+          count(DISTINCT oa_status)                        AS n_oa_types
         FROM read_parquet('{INGEST_PATH}/*_data.parquet')
         """
     )
@@ -193,12 +204,13 @@ def _(INGEST_PATH, mo):
 
 
 @app.cell
-def _(BRONZE_PATH, INGEST_PATH, mo):
-    # --- Store bronze (validated pass-through of the raw slice) ---
-    _bronze_write = mo.sql(
+def _(INGEST_PATH, mo):
+    _df = mo.sql(
         f"""
-        COPY (SELECT * FROM read_parquet('{INGEST_PATH}/*_data.parquet'))
-        TO '{BRONZE_PATH}' (FORMAT PARQUET, FILE_SIZE_BYTES )
+        CREATE SCHEMA IF NOT EXISTS db.openalex_bronze;
+
+        CREATE OR REPLACE TABLE db.openalex_bronze.works AS
+        SELECT * FROM read_parquet('{INGEST_PATH}/*_data.parquet')
         """
     )
     return
@@ -213,38 +225,19 @@ def hdr_silver(mo):
 
 
 @app.cell
-def silver(BRONZE_PATH, mo):
+def _(mo):
     silver_assert = mo.sql(
         f"""
-        -- Clean: drop rows missing core fields, keep unique work ids.
-        CREATE OR REPLACE TABLE silver_works AS
         SELECT
-          id,
-          COALESCE(doi, '')             AS doi,
-          COALESCE(title, '')           AS title,
-          publication_year,
-          COALESCE(publication_date, make_date(publication_year, 1, 1)) AS publication_date,
-          COALESCE(type, 'unknown')     AS type,
-          COALESCE(oa_status, 'closed') AS oa_status,
-          COALESCE(is_oa, oa_status != 'closed') AS is_oa
-        FROM read_parquet('{BRONZE_PATH}')
-        WHERE id IS NOT NULL
-          AND publication_year IS NOT NULL;
-
-        -- Drop duplicate work ids, keeping the first occurrence.
-        DELETE FROM silver_works
-        WHERE rowid NOT IN (
-            SELECT min(rowid) FROM silver_works GROUP BY id
-        );
-
-        SELECT
-          count(*)                            AS n_works,
+          count()                            AS n_works,
           count(DISTINCT id)                  AS n_unique_ids,
-          count(*) FILTER (WHERE publication_year IS NULL) AS null_year,
-          count(*) FILTER (WHERE oa_status NOT IN ('gold','hybrid','green','bronze','diamond','closed')) AS bad_status,
-          count(*) FILTER (WHERE is_oa AND oa_status = 'closed') AS oa_closed_contradiction,
-          (count(*) = count(DISTINCT id))     AS ids_unique
-        FROM silver_works
+          count() FILTER (WHERE doi IS NULL) AS null_doi,
+          count() FILTER (WHERE publication_date IS NULL) AS null_date,
+          count() FILTER (WHERE publication_date > today()) AS invalid_date,
+          count() FILTER (WHERE oa_status NOT IN ('gold','hybrid','green','bronze','diamond','closed')) AS bad_status,
+          count() FILTER (WHERE oa_status is NULL) AS oa_status_null,
+          (count() = count(DISTINCT id))     AS ids_unique
+        FROM db.openalex_bronze.works
         """
     )
     return (silver_assert,)
@@ -253,37 +246,82 @@ def silver(BRONZE_PATH, mo):
 @app.cell
 def _(silver_assert):
     # If any assertion fails, raise so the cell shows the problem clearly.
-    assert silver_assert["null_year"][0] == 0, f"null publication_year present: {silver_assert}"
-    assert silver_assert["bad_status"][0] == 0, f"unexpected oa_status values: {silver_assert}"
-    assert silver_assert["oa_closed_contradiction"][0] == 0, f"is_oa but oa_status=closed: {silver_assert}"
-    assert bool(silver_assert["ids_unique"][0]), f"duplicate ids in silver: {silver_assert}"
+    def data_assert(assertion, message, critical=False):
+        if not assertion and critical:
+            print(f"ERROR: {message}")
+            return False
+        if not assertion and not critical:
+            print(f"WARN:  {message}")
+        return True
+
+    checks = [
+        data_assert(silver_assert["null_doi"][0] == 0, 
+                    f"null doi present: {silver_assert["null_doi"][0]}",
+                    critical=True),
+        data_assert(silver_assert["null_date"][0] == 0, 
+                    f"null publication_date present: {silver_assert["null_date"][0]}",
+                    critical=False),
+        data_assert(silver_assert["invalid_date"][0] == 0, 
+                    f"invalid publication_date present: {silver_assert["invalid_date"][0]}",
+                    critical=False),
+        data_assert(silver_assert["bad_status"][0] == 0, 
+                    f"unexpected oa_status values: {silver_assert["bad_status"][0]}",
+                    critical=True),
+        data_assert(silver_assert["oa_status_null"][0] == 0,
+                    f"null oa_status present: {silver_assert["oa_status_null"][0]}",
+                    critical=False),
+        data_assert(bool(silver_assert["ids_unique"][0]),
+                    f"duplicate ids in set",
+                    critical=True)
+    ]
+
+    if False in checks:
+        raise AssertionError("Pipeline cannot continue")
     return
 
 
 @app.cell
-def _(SILVER_PATH, mo, silver_works):
-    # Persist silver.
+def _(mo):
     _df = mo.sql(
         f"""
-        COPY silver_works TO '{SILVER_PATH}' (FORMAT PARQUET)
+        -- Create the silver set
+        CREATE SCHEMA IF NOT EXISTS db.openalex_silver;
+        CREATE OR REPLACE TABLE db.openalex_silver.works AS
+        SELECT
+          replace(id, 'https://openalex.org/', '') as id,
+          doi,
+          title,
+          year(publication_date) 		AS publication_year,
+          publication_date,
+          COALESCE(type, 'unknown')     AS type,
+          COALESCE(oa_status, 'closed') AS oa_status,
+          COALESCE(oa_status != 'closed', oa_status IS NOT NULL) AS is_oa
+        FROM db.openalex_bronze.works
+        WHERE id IS NOT NULL
+          AND doi IS NOT NULL
+          AND publication_date IS NOT NULL
+          AND publication_date <= today();
         """
     )
     return
 
 
 @app.cell
-def _(mo, silver_works):
+def _(mo):
     # Preview.
     _df = mo.sql(
         f"""
-        SELECT publication_year, oa_status, count(*) AS n FROM silver_works GROUP BY 1,2 ORDER BY 1,2
+        SELECT publication_year::VARCHAR, oa_status, count(*) AS n 
+        FROM db.openalex_silver.works
+        GROUP BY 1,2 
+        ORDER BY 1,2
         """
     )
     return
 
 
 @app.cell(hide_code=True)
-def hdr_gold(mo):
+def _(mo):
     mo.md(r"""
     ## Gold — data ready for the dashboard
     """)
@@ -291,40 +329,35 @@ def hdr_gold(mo):
 
 
 @app.cell
-def gold(SILVER_PATH, mo):
+def gold(mo):
     gold_oa = mo.sql(
         f"""
+        CREATE SCHEMA IF NOT EXISTS db.openalex_gold;
+        CREATE OR REPLACE TABLE db.openalex_gold.oa_status_per_year AS
         SELECT
-          publication_year AS year,
-          oa_status AS oa_type,
+          publication_year AS pub_year,
+          oa_status,
           count(*) AS n_works
-        FROM read_parquet('{SILVER_PATH}')
+        FROM db.openalex_silver.works
         GROUP BY publication_year, oa_status
         ORDER BY publication_year, oa_status
         """
     )
-    return (gold_oa,)
+    return
 
 
 @app.cell
-def _(GOLD_PATH, gold_oa, mo):
+def _(mo):
     _df = mo.sql(
         f"""
-        COPY gold_oa TO '{GOLD_PATH}' (FORMAT PARQUET)
+        SELECT * FROM db.openalex_gold.oa_status_per_year;
         """
     )
     return
 
 
-@app.cell
-def _(gold_oa):
-    # Show the table so the dashboard data is visible in the notebook.
-    gold_oa
-    return
-
-
 @app.cell(hide_code=True)
-def hdr_chart(mo):
+def _(mo):
     mo.md(r"""
     ## Chart — Dutch open-access output
     """)
@@ -332,36 +365,57 @@ def hdr_chart(mo):
 
 
 @app.cell
-def _(GOLD_PATH, mo):
+def _(mo):
     oa_by_year = mo.sql(
         f"""
-        SELECT * FROM read_parquet('{GOLD_PATH}') ORDER BY year, oa_type
-        """
+        SELECT pub_year, oa_status, n_works
+        FROM db.openalex_gold.oa_status_per_year
+        WHERE pub_year BETWEEN 1990 and year(today())
+        """,
+        output=False
     )
     return (oa_by_year,)
 
 
 @app.cell
-def chart(mo, oa_by_year):
-    # Single chart: open-access publications from the Netherlands, per year, by OA type.
-    import polars as pl
-    import plotly.graph_objects as go
+def _():
+    import altair as alt
 
-    # Build one stacked bar trace per OA type.
-    oa_fig = go.Figure()
-    for oa_type in sorted(oa_by_year["oa_type"].unique().to_list()):
-        sub = oa_by_year.filter(pl.col("oa_type") == oa_type)
-        oa_fig.add_trace(go.Bar(
-            x=sub["year"].to_list(), y=sub["n_works"].to_list(), name=oa_type,
-        ))
-    oa_fig.update_layout(
-        barmode="stack",
-        xaxis_title="Publication year",
-        yaxis_title="# publications",
-        title="Open-access publications from the Netherlands (demo slice)",
+    return (alt,)
+
+
+@app.cell(hide_code=True)
+def _(alt, oa_by_year):
+    # replace _df with your data source
+    _chart = (
+        alt.Chart(oa_by_year)
+        .mark_bar()
+        .encode(
+            x=alt.X(field='pub_year', type='nominal'),
+            y=alt.Y(field='n_works', type='quantitative', stack=True, aggregate='mean'),
+            color=alt.Color(field='oa_status', type='nominal'),
+            tooltip=[
+                alt.Tooltip(field='pub_year', format=',.0f'),
+                alt.Tooltip(field='n_works', aggregate='mean', format=',.0f'),
+                alt.Tooltip(field='oa_status')
+            ]
+        )
+        .properties(
+            height=290,
+            width='container',
+            config={
+                'axis': {
+                    'grid': False
+                }
+            }
+        )
     )
+    _chart
+    return
 
-    mo.ui.plotly(oa_fig)
+
+@app.cell
+def _():
     return
 
 

@@ -10,3 +10,4 @@ wheels/
 .venv
 __marimo__/
 /.env
+*.wal
