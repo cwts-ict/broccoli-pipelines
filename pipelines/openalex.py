@@ -386,7 +386,6 @@ def _():
 
 @app.cell(hide_code=True)
 def _(alt, oa_by_year):
-    # replace _df with your data source
     _chart = (
         alt.Chart(oa_by_year)
         .mark_bar()
