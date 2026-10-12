@@ -32,12 +32,7 @@ Parquet is a solid option for the long-term, as it is open and flexible.
 
 ### Lock-in/exit potential
 
-Migrating away from parquet at a late stage would be difficult as it will be
-the core of our data storage, although this would be the case for almost any
-file storage format. We mitigate this by keeping parquet strictly
-table-oriented: columns of text, numeric, date, boolean, etc. no deeply
-nested structs or serialised objects. Migration to CSV, JSON, or most
-database table formats then stays straightforward.
+Migrating away from parquet at a late stage would be difficult as it will be the core of our data storage, although this would be the case for almost any file storage format. We mitigate this by keeping parquet strictly table-oriented: columns of text, numeric, date, boolean, etc. no deeply nested structs or serialised objects. Migration to CSV, JSON, or most database table formats then stays straightforward.
 
 # Data table format
 
@@ -82,23 +77,15 @@ Ultimately we will be using tables to store and retrieve data. We need a system 
 
 ## Decision outcome: DuckLake (preliminary)
 
-We will move ahead with DuckLake as a preliminary option. It gives us the
-flexibility to store the index in a few databases (For now DuckDB, might need to switch to Postgres for concurrent writes)
-and it works with plain parquet files.
+We will move ahead with DuckLake as a preliminary option. It gives us the flexibility to store the index in a few databases (For now DuckDB, might need to switch to Postgres for concurrent writes) and it works with plain parquet files.
 
-Chosen over Iceberg and Delta Lake because those bring catalog infrastructure
-and operational complexity that is disproportionate to our scale; over plain
-DuckDB files because we do want catalog-managed versioning and multi-writer
-support without losing the open parquet storage layer; over Postgres/BigQuery
-because we prefer data in open files rather than inside a managed DBMS.
+Chosen over Iceberg and Delta Lake because those bring catalog infrastructure and operational complexity that is disproportionate to our scale; over plain DuckDB files because we do want catalog-managed versioning and multi-writer support without losing the open parquet storage layer; over Postgres/BigQuery because we prefer data in open files rather than inside a managed DBMS.
 
 # Compute Platform
 
 ## Context and problem statement
 
-Where do the pipelines run? We need compute for ingestion jobs,
-transformations and (periodic) full pipeline runs, without significant
-operational overhead.
+Where do the pipelines run? We need compute for ingestion jobs, transformations and (periodic) full pipeline runs, without significant operational overhead.
 
 ## Considered options
 
@@ -121,17 +108,13 @@ SURF Research Cloud is the working choice: cost-effective, sovereign, and fricti
 
 ### Lock-in/exit potential
 
-Low. Nothing in the stack depends on Research Cloud-specific services; the
-platform provides VMs and storage, which are commodities. Exit is mainly an
-operational (redeployment) effort plus higher running costs elsewhere.
+Low. Nothing in the stack depends on Research Cloud-specific services; the platform provides VMs and storage, which are commodities. Exit is mainly an operational (redeployment) effort.
 
 # Data Storage Platform
 
 ## Context and problem statement
 
-Where do the parquet files and DuckLake catalog live? We need durable,
-shared storage accessible from the compute platform, without significant
-operational overhead.
+Where do the parquet files and DuckLake catalog live? We need durable, shared storage accessible from the compute platform, without significant operational overhead.
 
 ## Considered options
 
@@ -156,23 +139,13 @@ SURF Object Store is the working choice, primarily because it is S3-compatible, 
 
 ### Lock-in/exit potential
 
-Low to moderate. Because the store is S3-compatible and only holds plain
-parquet files plus a DuckLake catalog, migrating to AWS S3, GCS, Azure Blob
-or any other S3-compatible store is a bulk copy plus a catalog connection
-string change. The main residual cost is data egress volume, not format or
-API lock-in.
+Low to moderate. Because the store is S3-compatible and only holds plain parquet files plus a DuckLake catalog, migrating to AWS S3, GCS, Azure Blob or any other S3-compatible store is a bulk copy plus a catalog connection string change.
 
 # Pipeline Orchestration
 
 ## Context and problem statement
 
 How do pipelines get scheduled, triggered and monitored? Pipelines must run reproducibly and periodically without manual intervention, and failures must be visible.
-How do pipelines get scheduled, triggered and monitored? Pipelines must run reproducibly and periodically without manual intervention, and failures must be visible.
-
-Note: the current demo workflow runs pipelines as marimo notebooks. That is
-a temporary authoring convenience; the orchestration decision below is
-evaluated on its own merits, independent of how pipeline code happens to be
-authored today.
 
 ## Options
 
@@ -213,31 +186,22 @@ authored today.
 - pro: Zero infrastructure; good enough for a handful of nightly jobs
 - con: No dependency management, retries, visibility, or history
 - con: Does not scale past the trivial-pipeline stage
+
 ## Decision outcome: Marimo notebooks (preliminary)
 
-For the current demo stage, marimo notebooks serve as the pipeline unit of
-execution: each notebook is a runnable, schedulable artifact with built-in
-reproducibility (no hidden state) and native DuckDB/DuckLake support, with a
-lightweight external trigger (cron or similar) for scheduling. This is a
-pragmatic choice for exploration, not a settled architectural position.
+For the current demo stage, marimo notebooks serve as the pipeline unit of execution: each notebook is a runnable, schedulable artifact with built-in reproducibility (no hidden state) and native DuckDB/DuckLake support, with a lightweight external trigger (cron or similar) for scheduling. This is a pragmatic choice for exploration, not a settled architectural position.
 
-On their own merits, Airflow and OpenMetadata are the serious contenders for
-a production orchestrator: Airflow for mature scheduling at modest
-operational cost, OpenMetadata if metadata management and lineage become
-first-class requirements rather than nice-to-haves. Dagster's asset-oriented
-model also fits the table-oriented data architecture well.
+On their own merits, Airflow and OpenMetadata are the serious contenders for a production orchestrator: Airflow for mature scheduling at modest operational cost, OpenMetadata if metadata management and lineage become first-class requirements rather than nice-to-haves. Dagster's asset-oriented model also fits the table-oriented data architecture well.
 
 ### Lock-in/exit potential
 
-Low. Marimo notebooks are plain Python files, versionable, importable and
-executable outside marimo, so pipeline logic can be lifted into any
-orchestrator without rewriting. The reverse also holds: choosing an
-orchestrator first does not commit us to notebook-style authoring.
+Low. Marimo notebooks are plain Python files, versionable, importable and executable outside marimo, so pipeline logic can be lifted into any orchestrator without rewriting.
+
 # Pipeline Programming Language
+
 ## Context and problem statement
 
-In which language/environment do we implement the pipelines that ingest,
-transform and serve our data?
+In which language/environment do we implement the pipelines that ingest, transform and serve our data?
 
 ## Options
 
@@ -279,19 +243,13 @@ transform and serve our data?
 
 ## Decision outcome: Python/DuckDB (preliminary)
 
-Python is a given as the pipeline language; DuckDB is the data processing
-engine within it. The intended division of labour:
+Python is a given as the pipeline language; DuckDB is the data processing engine within it. The intended division of labour:
 
 - **Python**: Orchestration, API ingestion, glue code
 - **DuckDB**: All table-level processing, columnar format ingestion, reading/writing parquet and DuckLake
 - **marimo**: Bridge: notebooks that embed Python and SQL/DuckDB cells
 
-dbt+dlt and SQLMesh remain options to test as alternative transformation
-layers instead of or on top of DuckDB; either could replace
-hand-written Python transformation code without changing the storage or
-engine decisions. SQLMesh is maybe the more interesting of the two for this stack
-because its virtual environments and data diffing align well with the
-snapshot/versioning approach in the data layer.
+dbt+dlt and SQLMesh remain options to test as alternative transformation layers instead of or on top of DuckDB; either could replace hand-written Python transformation code without changing the storage or engine decisions. SQLMesh is maybe the more interesting of the two for this stack because its virtual environments and data diffing align well with the snapshot/versioning approach in the data layer.
 
 ### Lock-in/exit potential
 
@@ -303,13 +261,7 @@ DuckDB does carry some some lock-in: it is a single implementation with single-w
 
 ## Context and problem statement
 
-Research outputs (reports, indicators, exploratory views) need to reach
-users, researchers, librarians, management, as something interactive or
-at least browsable. We need to decide how dashboards/applications are built
-and served, on top of the DuckLake data layer. Requirements are expected to
-include: low-friction development by data people (not frontend engineers),
-interactivity (filtering, drill-down), and sharing within the institute and
-possibly with external partners.
+Research outputs (reports, indicators, exploratory views) need to reach users, researchers, librarians, management, as something interactive or at least browsable. We need to decide how dashboards/applications are built and served, on top of the DuckLake data layer. Requirements are expected to include: low-friction development by data people (not frontend engineers), interactivity (filtering, drill-down), and sharing within the institute and possibly with external partners.
 
 ## Considered options
 
@@ -352,13 +304,10 @@ possibly with external partners.
 
 ## Decision outcome: marimo apps (preliminary)
 
-For the demo stage, marimo apps are the working choice: they reuse the existing notebook stack and its DuckDB/DuckLake integration, so a dashboard is essentially a curated notebook over the data layer.
+For the demo stage, marimo apps are a pragmatic choice: they reuse the existing stack and its DuckDB/DuckLake integration, so a dashboard is essentially a curated notebook over the data layer.
 
-If dashboards become a product with real users, the serious contenders to revisit are Streamlit (fastest path to a polished app) and Shiny for Python (best reactive model for filter-driven research dashboards). A BI platform such as Superset is the contender if self-service (users building their own views and charts against the data layer) becomes a requirement, since auth/permissions and dashboard authoring come out of the box. A custom web app only enters the picture if branding/auth/UX requirements justify dedicated frontend capacity.
+If dashboards become a product with real users, the serious contenders to revisit are Streamlit (fastest path to a polished app) and Shiny for Python (best reactive model for filter-driven research dashboards). A BI platform such as Superset is the contender if self-service (users building their own views and charts against the data layer) becomes a requirement, since auth/permissions and dashboard authoring come out of the box. A custom web app might be a hard requirement for the UKBsis successor application.
 
 ### Lock-in/exit potential
 
-Low. The valuable logic lives in SQL/queries against the data layer, not in
-the dashboard framework. Chart code (Altair/Plotly specs) is portable across
-all Python dashboard options, so switching frameworks is a rewrite of the
-presentation layer only.
+Low. The valuable logic lives in the data layer, not in the dashboard framework. Chart code (Altair/Plotly specs) is portable across all Python dashboard options, so switching frameworks is a rewrite of the presentation layer only.
